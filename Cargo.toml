@@ -1,0 +1,17 @@
+[package]
+name = "cribbage_finder"
+version = "0.1.0"
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rayon = "*"
+crossbeam-channel = "*"
+console = "*"
+once_cell = "*"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
