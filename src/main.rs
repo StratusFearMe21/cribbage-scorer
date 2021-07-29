@@ -1,10 +1,11 @@
 use console::style;
+use crossbeam::atomic::AtomicCell;
 use once_cell::sync::Lazy;
 use rayon::{
     iter::{IntoParallelRefIterator, ParallelIterator},
     slice::ParallelSliceMut,
 };
-use std::{borrow::Borrow, env, sync::atomic::AtomicBool};
+use std::{borrow::Borrow, env};
 const SETSOF2: [[usize; 2]; 10] = [
     [0, 1],
     [0, 2],
@@ -155,7 +156,7 @@ fn main() {
                 });
             });
             s.spawn(|_| {
-                let returnbit = AtomicBool::new(false);
+                let returnbit = AtomicCell::new(false);
                 let mut cards: [u8; 5] = [
                     CARDS[0].into_u8_normal(),
                     CARDS[1].into_u8_normal(),
@@ -178,10 +179,10 @@ fn main() {
                         && (cards[i[2]] == cards[i[3]] - 1)
                     {
                         tx.send((Scoring::Run, i.to_vec())).unwrap();
-                        returnbit.store(true, std::sync::atomic::Ordering::Relaxed);
+                        returnbit.store(true);
                     }
                 });
-                if !returnbit.load(std::sync::atomic::Ordering::Relaxed) {
+                if !returnbit.load() {
                     SETSOF3.par_iter().for_each(|i| {
                         if (cards[i[0]] == cards[i[1]] - 1) && (cards[i[1]] == cards[i[2]] - 1) {
                             tx.send((Scoring::Run, i.to_vec())).unwrap();
