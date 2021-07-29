@@ -7,10 +7,9 @@ edition = "2018"
 
 [dependencies]
 rayon = "*"
-crossbeam-channel = "*"
+crossbeam = "*"
 console = "*"
 once_cell = "*"
-convec = "*"
 
 [profile.release]
 lto = "fat"
