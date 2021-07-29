@@ -1,12 +1,11 @@
-use std::{borrow::Borrow, env};
-
 use console::style;
+use convec::AoVec;
 use once_cell::sync::Lazy;
 use rayon::{
     iter::{IntoParallelRefIterator, ParallelIterator},
     slice::ParallelSliceMut,
 };
-
+use std::{borrow::Borrow, env, sync::atomic::AtomicBool};
 const SETSOF2: [[usize; 2]; 10] = [
     [0, 1],
     [0, 2],
@@ -38,21 +37,17 @@ const SETSOF4: [[usize; 4]; 5] = [
     [0, 2, 3, 4],
     [1, 2, 3, 4],
 ];
-
 static CARDS: Lazy<[Card; 5]> = Lazy::new(|| {
     let mut args = env::args();
-    let mut cards = [
+    let cards = [
         Card::from(args.nth(1).unwrap()),
         Card::from(args.next().unwrap()),
         Card::from(args.next().unwrap()),
         Card::from(args.next().unwrap()),
         Card::from(args.next().unwrap()),
     ];
-    cards.par_sort();
     cards
 });
-
-#[derive(Hash)]
 enum Card {
     Number(u8),
     Queen,
@@ -60,14 +55,13 @@ enum Card {
     Jack,
     Ace,
 }
-
+#[derive(Clone)]
 enum Scoring {
     Fifteen,
     Pair,
     ThirtyOne,
-    Stop,
+    Run,
 }
-
 impl From<String> for Card {
     fn from(s: String) -> Self {
         match s.borrow() {
@@ -79,7 +73,6 @@ impl From<String> for Card {
         }
     }
 }
-
 impl ToString for Card {
     fn to_string(&self) -> String {
         match &self {
@@ -91,7 +84,6 @@ impl ToString for Card {
         }
     }
 }
-
 impl Card {
     fn into_u8_cribbage(&self) -> u8 {
         match &self {
@@ -110,27 +102,12 @@ impl Card {
         }
     }
 }
-
-impl Ord for Card {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.into_u8_normal().cmp(&other.into_u8_normal())
-    }
-}
-
-impl PartialOrd for Card {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 impl PartialEq for Card {
     fn eq(&self, other: &Self) -> bool {
         self.into_u8_normal() == other.into_u8_normal()
     }
 }
-
 impl Eq for Card {}
-
 fn print_cards(cardsindexes: Vec<usize>) {
     for i in 0..5 {
         if cardsindexes.contains(&i) {
@@ -140,107 +117,139 @@ fn print_cards(cardsindexes: Vec<usize>) {
         }
     }
 }
-
 fn main() {
-    let (tx, rx) = crossbeam_channel::unbounded();
-    rayon::scope(|t| {
-        t.spawn(move |_| {
-            let mut points: u8 = 0;
-            loop {
-                match rx.recv() {
-                    Ok((Scoring::Fifteen, cardsindexes)) => {
-                        points += 2;
-                        print_cards(cardsindexes);
-                        println!("15 for {}", points);
-                    }
-                    Ok((Scoring::ThirtyOne, cardsindexes)) => {
-                        points += 2;
-                        print_cards(cardsindexes);
-                        println!("31 for {}", points);
-                    }
-                    Ok((Scoring::Pair, cardsindexes)) => {
-                        points += 2;
-                        print_cards(cardsindexes);
-                        println!("Pair for {}", points);
-                    }
-                    Ok((Scoring::Stop, _)) => return,
-                    _ => {}
+    let resvec = AoVec::new();
+    rayon::scope(|s| {
+        s.spawn(|_| {
+            SETSOF2.par_iter().for_each(|i| {
+                if CARDS[i[0]] == CARDS[i[1]] {
+                    resvec.push((Scoring::Pair, i.to_vec()));
                 }
+            });
+        });
+        s.spawn(|_| {
+            let returnbit = AtomicBool::new(false);
+            let mut cards: [u8; 5] = [
+                CARDS[0].into_u8_normal(),
+                CARDS[1].into_u8_normal(),
+                CARDS[2].into_u8_normal(),
+                CARDS[3].into_u8_normal(),
+                CARDS[4].into_u8_normal(),
+            ];
+            cards.par_sort();
+            if (cards[0] == cards[1] - 1)
+                && (cards[1] == cards[2] - 1)
+                && (cards[2] == cards[3] - 1)
+                && (cards[3] == cards[4] - 1)
+            {
+                resvec.push((Scoring::Run, vec![0, 1, 2, 3, 4]));
+                return;
+            }
+            SETSOF4.par_iter().for_each(|i| {
+                if (cards[i[0]] == cards[i[1]] - 1)
+                    && (cards[i[1]] == cards[i[2]] - 1)
+                    && (cards[i[2]] == cards[i[3]] - 1)
+                {
+                    resvec.push((Scoring::Run, i.to_vec()));
+                    returnbit.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+            if !returnbit.load(std::sync::atomic::Ordering::Relaxed) {
+                SETSOF3.par_iter().for_each(|i| {
+                    if (cards[i[0]] == cards[i[1]] - 1) && (cards[i[1]] == cards[i[2]] - 1) {
+                        resvec.push((Scoring::Run, i.to_vec()));
+                    }
+                });
             }
         });
-        rayon::scope(|s| {
-            s.spawn(|_| {
-                SETSOF2.par_iter().for_each(|i| {
-                    if CARDS[i[0]] == CARDS[i[1]] {
-                        tx.send((Scoring::Pair, i.to_vec())).unwrap();
-                    }
-                });
-            });
-            s.spawn(|_| {
-                SETSOF2.par_iter().for_each(|i| {
-                    if CARDS[i[0]].into_u8_cribbage() + CARDS[i[1]].into_u8_cribbage() == 15 {
-                        tx.send((Scoring::Fifteen, i.to_vec())).unwrap();
-                    }
-                });
-            });
-            s.spawn(|_| {
-                SETSOF3.par_iter().for_each(|i| {
-                    if CARDS[i[0]].into_u8_cribbage()
-                        + CARDS[i[1]].into_u8_cribbage()
-                        + CARDS[i[2]].into_u8_cribbage()
-                        == 15
-                    {
-                        tx.send((Scoring::Fifteen, i.to_vec())).unwrap();
-                    }
-                });
-            });
-            s.spawn(|_| {
-                SETSOF4.par_iter().for_each(|i| {
-                    if CARDS[i[0]].into_u8_cribbage()
-                        + CARDS[i[1]].into_u8_cribbage()
-                        + CARDS[i[2]].into_u8_cribbage()
-                        + CARDS[i[3]].into_u8_cribbage()
-                        == 15
-                    {
-                        tx.send((Scoring::Fifteen, i.to_vec())).unwrap();
-                    }
-                });
-            });
-            s.spawn(|_| {
-                if CARDS[0].into_u8_cribbage()
-                    + CARDS[1].into_u8_cribbage()
-                    + CARDS[2].into_u8_cribbage()
-                    + CARDS[3].into_u8_cribbage()
-                    + CARDS[4].into_u8_cribbage()
-                    == 15
-                {
-                    tx.send((Scoring::ThirtyOne, vec![0, 1, 2, 3, 4])).unwrap();
-                }
-            });
-            s.spawn(|_| {
-                SETSOF4.par_iter().for_each(|i| {
-                    if CARDS[i[0]].into_u8_cribbage()
-                        + CARDS[i[1]].into_u8_cribbage()
-                        + CARDS[i[2]].into_u8_cribbage()
-                        + CARDS[i[3]].into_u8_cribbage()
-                        == 31
-                    {
-                        tx.send((Scoring::ThirtyOne, i.to_vec())).unwrap();
-                    }
-                });
-            });
-            s.spawn(|_| {
-                if CARDS[0].into_u8_cribbage()
-                    + CARDS[1].into_u8_cribbage()
-                    + CARDS[2].into_u8_cribbage()
-                    + CARDS[3].into_u8_cribbage()
-                    + CARDS[4].into_u8_cribbage()
-                    == 31
-                {
-                    tx.send((Scoring::ThirtyOne, vec![0, 1, 2, 3, 4])).unwrap();
+        s.spawn(|_| {
+            SETSOF2.par_iter().for_each(|i| {
+                if CARDS[i[0]].into_u8_cribbage() + CARDS[i[1]].into_u8_cribbage() == 15 {
+                    resvec.push((Scoring::Fifteen, i.to_vec()));
                 }
             });
         });
-        tx.send((Scoring::Stop, Vec::with_capacity(0))).unwrap();
+        s.spawn(|_| {
+            SETSOF3.par_iter().for_each(|i| {
+                if CARDS[i[0]].into_u8_cribbage()
+                    + CARDS[i[1]].into_u8_cribbage()
+                    + CARDS[i[2]].into_u8_cribbage()
+                    == 15
+                {
+                    resvec.push((Scoring::Fifteen, i.to_vec()));
+                }
+            });
+        });
+        s.spawn(|_| {
+            SETSOF4.par_iter().for_each(|i| {
+                if CARDS[i[0]].into_u8_cribbage()
+                    + CARDS[i[1]].into_u8_cribbage()
+                    + CARDS[i[2]].into_u8_cribbage()
+                    + CARDS[i[3]].into_u8_cribbage()
+                    == 15
+                {
+                    resvec.push((Scoring::Fifteen, i.to_vec()));
+                }
+            });
+        });
+        s.spawn(|_| {
+            if CARDS[0].into_u8_cribbage()
+                + CARDS[1].into_u8_cribbage()
+                + CARDS[2].into_u8_cribbage()
+                + CARDS[3].into_u8_cribbage()
+                + CARDS[4].into_u8_cribbage()
+                == 15
+            {
+                resvec.push((Scoring::ThirtyOne, vec![0, 1, 2, 3, 4]));
+            }
+        });
+        s.spawn(|_| {
+            SETSOF4.par_iter().for_each(|i| {
+                if CARDS[i[0]].into_u8_cribbage()
+                    + CARDS[i[1]].into_u8_cribbage()
+                    + CARDS[i[2]].into_u8_cribbage()
+                    + CARDS[i[3]].into_u8_cribbage()
+                    == 31
+                {
+                    resvec.push((Scoring::ThirtyOne, i.to_vec()));
+                }
+            });
+        });
+        s.spawn(|_| {
+            if CARDS[0].into_u8_cribbage()
+                + CARDS[1].into_u8_cribbage()
+                + CARDS[2].into_u8_cribbage()
+                + CARDS[3].into_u8_cribbage()
+                + CARDS[4].into_u8_cribbage()
+                == 31
+            {
+                resvec.push((Scoring::ThirtyOne, vec![0, 1, 2, 3, 4]));
+            }
+        });
     });
+    let mut points: u8 = 0;
+    for i in 0..resvec.len() {
+        match resvec[i].clone() {
+            (Scoring::Fifteen, cardsindexes) => {
+                points += 2;
+                print_cards(cardsindexes);
+                println!("15 for {}", points);
+            }
+            (Scoring::ThirtyOne, cardsindexes) => {
+                points += 2;
+                print_cards(cardsindexes);
+                println!("31 for {}", points);
+            }
+            (Scoring::Pair, cardsindexes) => {
+                points += 2;
+                print_cards(cardsindexes);
+                println!("Pair for {}", points);
+            }
+            (Scoring::Run, cardsindexes) => {
+                points += cardsindexes.len() as u8;
+                print_cards(cardsindexes);
+                println!("Run for {}", points);
+            }
+        }
+    }
 }

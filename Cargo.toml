@@ -10,6 +10,7 @@ rayon = "*"
 crossbeam-channel = "*"
 console = "*"
 once_cell = "*"
+convec = "*"
 
 [profile.release]
 lto = "fat"
