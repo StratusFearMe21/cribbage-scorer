@@ -8,6 +8,7 @@ edition = "2018"
 [dependencies]
 rayon = "*"
 crossbeam = "*"
+convec = "*"
 console = "*"
 once_cell = "*"
 

@@ -1,5 +1,5 @@
 use console::style;
-use crossbeam::atomic::AtomicCell;
+use crossbeam::{atomic::AtomicCell, queue::ArrayQueue};
 use once_cell::sync::Lazy;
 use rayon::{
     iter::{IntoParallelRefIterator, ParallelIterator},
@@ -39,13 +39,14 @@ const SETSOF4: [[usize; 4]; 5] = [
 ];
 static CARDS: Lazy<[Card; 5]> = Lazy::new(|| {
     let mut args = env::args();
-    let cards = [
+    let mut cards = [
         Card::from(args.nth(1).unwrap()),
         Card::from(args.next().unwrap()),
         Card::from(args.next().unwrap()),
         Card::from(args.next().unwrap()),
         Card::from(args.next().unwrap()),
     ];
+    cards.par_sort();
     cards
 });
 enum Card {
@@ -55,7 +56,7 @@ enum Card {
     Jack,
     Ace,
 }
-#[derive(Clone)]
+#[derive(Debug)]
 enum Scoring {
     Fifteen,
     Pair,
@@ -102,6 +103,16 @@ impl Card {
         }
     }
 }
+impl Ord for Card {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.into_u8_normal().cmp(&other.into_u8_normal())
+    }
+}
+impl PartialOrd for Card {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
 impl PartialEq for Card {
     fn eq(&self, other: &Self) -> bool {
         self.into_u8_normal() == other.into_u8_normal()
@@ -117,144 +128,143 @@ fn print_cards(cardsindexes: Vec<usize>) {
         }
     }
 }
+
 fn main() {
-    let (tx, rx) = crossbeam::channel::unbounded();
-    rayon::scope(|t| {
-        t.spawn(|_| {
-            let mut points: u8 = 0;
-            for i in rx {
-                match i {
-                    (Scoring::Fifteen, cardsindexes) => {
-                        points += 2;
-                        print_cards(cardsindexes);
-                        println!("15 for {}", points);
-                    }
-                    (Scoring::ThirtyOne, cardsindexes) => {
-                        points += 2;
-                        print_cards(cardsindexes);
-                        println!("31 for {}", points);
-                    }
-                    (Scoring::Pair, cardsindexes) => {
-                        points += 2;
-                        print_cards(cardsindexes);
-                        println!("Pair for {}", points);
-                    }
-                    (Scoring::Run, cardsindexes) => {
-                        points += cardsindexes.len() as u8;
-                        print_cards(cardsindexes);
-                        println!("Run for {}", points);
-                    }
+    let result = ArrayQueue::new(14);
+    rayon::scope(|s| {
+        s.spawn(|_| {
+            SETSOF2.par_iter().for_each(|i| {
+                if CARDS[i[0]] == CARDS[i[1]] {
+                    result.push((Scoring::Pair, i.to_vec())).unwrap();
                 }
+            });
+        });
+        s.spawn(|_| {
+            let returnbit = AtomicCell::new(false);
+            let cards: [u8; 5] = [
+                CARDS[0].into_u8_normal(),
+                CARDS[1].into_u8_normal(),
+                CARDS[2].into_u8_normal(),
+                CARDS[3].into_u8_normal(),
+                CARDS[4].into_u8_normal(),
+            ];
+            if (cards[0] == cards[1] - 1)
+                && (cards[1] == cards[2] - 1)
+                && (cards[2] == cards[3] - 1)
+                && (cards[3] == cards[4] - 1)
+            {
+                result.push((Scoring::Run, vec![0, 1, 2, 3, 4])).unwrap();
+                return;
+            }
+            [[0, 1, 2, 3], [1, 2, 3, 4]].par_iter().for_each(|i| {
+                if (cards[i[0]] == cards[i[1]] - 1)
+                    && (cards[i[1]] == cards[i[2]] - 1)
+                    && (cards[i[2]] == cards[i[3]] - 1)
+                {
+                    result.push((Scoring::Run, i.to_vec())).unwrap();
+                    returnbit.store(true);
+                }
+            });
+            if !returnbit.load() {
+                [[0, 1, 2], [1, 2, 3], [2, 3, 4]].par_iter().for_each(|i| {
+                    if (cards[i[0]] == cards[i[1]] - 1) && (cards[i[1]] == cards[i[2]] - 1) {
+                        result.push((Scoring::Run, i.to_vec())).unwrap();
+                    }
+                });
             }
         });
-        rayon::scope(|s| {
-            s.spawn(|_| {
-                SETSOF2.par_iter().for_each(|i| {
-                    if CARDS[i[0]] == CARDS[i[1]] {
-                        tx.send((Scoring::Pair, i.to_vec())).unwrap();
-                    }
-                });
-            });
-            s.spawn(|_| {
-                let returnbit = AtomicCell::new(false);
-                let mut cards: [u8; 5] = [
-                    CARDS[0].into_u8_normal(),
-                    CARDS[1].into_u8_normal(),
-                    CARDS[2].into_u8_normal(),
-                    CARDS[3].into_u8_normal(),
-                    CARDS[4].into_u8_normal(),
-                ];
-                cards.par_sort();
-                if (cards[0] == cards[1] - 1)
-                    && (cards[1] == cards[2] - 1)
-                    && (cards[2] == cards[3] - 1)
-                    && (cards[3] == cards[4] - 1)
-                {
-                    tx.send((Scoring::Run, vec![0, 1, 2, 3, 4])).unwrap();
-                    return;
-                }
-                SETSOF4.par_iter().for_each(|i| {
-                    if (cards[i[0]] == cards[i[1]] - 1)
-                        && (cards[i[1]] == cards[i[2]] - 1)
-                        && (cards[i[2]] == cards[i[3]] - 1)
-                    {
-                        tx.send((Scoring::Run, i.to_vec())).unwrap();
-                        returnbit.store(true);
-                    }
-                });
-                if !returnbit.load() {
-                    SETSOF3.par_iter().for_each(|i| {
-                        if (cards[i[0]] == cards[i[1]] - 1) && (cards[i[1]] == cards[i[2]] - 1) {
-                            tx.send((Scoring::Run, i.to_vec())).unwrap();
-                        }
-                    });
-                }
-            });
-            s.spawn(|_| {
-                SETSOF2.par_iter().for_each(|i| {
-                    if CARDS[i[0]].into_u8_cribbage() + CARDS[i[1]].into_u8_cribbage() == 15 {
-                        tx.send((Scoring::Fifteen, i.to_vec())).unwrap();
-                    }
-                });
-            });
-            s.spawn(|_| {
-                SETSOF3.par_iter().for_each(|i| {
-                    if CARDS[i[0]].into_u8_cribbage()
-                        + CARDS[i[1]].into_u8_cribbage()
-                        + CARDS[i[2]].into_u8_cribbage()
-                        == 15
-                    {
-                        tx.send((Scoring::Fifteen, i.to_vec())).unwrap();
-                    }
-                });
-            });
-            s.spawn(|_| {
-                SETSOF4.par_iter().for_each(|i| {
-                    if CARDS[i[0]].into_u8_cribbage()
-                        + CARDS[i[1]].into_u8_cribbage()
-                        + CARDS[i[2]].into_u8_cribbage()
-                        + CARDS[i[3]].into_u8_cribbage()
-                        == 15
-                    {
-                        tx.send((Scoring::Fifteen, i.to_vec())).unwrap();
-                    }
-                });
-            });
-            s.spawn(|_| {
-                if CARDS[0].into_u8_cribbage()
-                    + CARDS[1].into_u8_cribbage()
-                    + CARDS[2].into_u8_cribbage()
-                    + CARDS[3].into_u8_cribbage()
-                    + CARDS[4].into_u8_cribbage()
-                    == 15
-                {
-                    tx.send((Scoring::ThirtyOne, vec![0, 1, 2, 3, 4])).unwrap();
-                }
-            });
-            s.spawn(|_| {
-                SETSOF4.par_iter().for_each(|i| {
-                    if CARDS[i[0]].into_u8_cribbage()
-                        + CARDS[i[1]].into_u8_cribbage()
-                        + CARDS[i[2]].into_u8_cribbage()
-                        + CARDS[i[3]].into_u8_cribbage()
-                        == 31
-                    {
-                        tx.send((Scoring::ThirtyOne, i.to_vec())).unwrap();
-                    }
-                });
-            });
-            s.spawn(|_| {
-                if CARDS[0].into_u8_cribbage()
-                    + CARDS[1].into_u8_cribbage()
-                    + CARDS[2].into_u8_cribbage()
-                    + CARDS[3].into_u8_cribbage()
-                    + CARDS[4].into_u8_cribbage()
-                    == 31
-                {
-                    tx.send((Scoring::ThirtyOne, vec![0, 1, 2, 3, 4])).unwrap();
+        s.spawn(|_| {
+            SETSOF2.par_iter().for_each(|i| {
+                if CARDS[i[0]].into_u8_cribbage() + CARDS[i[1]].into_u8_cribbage() == 15 {
+                    result.push((Scoring::Fifteen, i.to_vec())).unwrap();
                 }
             });
         });
-        drop(tx);
+        s.spawn(|_| {
+            SETSOF3.par_iter().for_each(|i| {
+                if CARDS[i[0]].into_u8_cribbage()
+                    + CARDS[i[1]].into_u8_cribbage()
+                    + CARDS[i[2]].into_u8_cribbage()
+                    == 15
+                {
+                    result.push((Scoring::Fifteen, i.to_vec())).unwrap();
+                }
+            });
+        });
+        s.spawn(|_| {
+            SETSOF4.par_iter().for_each(|i| {
+                if CARDS[i[0]].into_u8_cribbage()
+                    + CARDS[i[1]].into_u8_cribbage()
+                    + CARDS[i[2]].into_u8_cribbage()
+                    + CARDS[i[3]].into_u8_cribbage()
+                    == 15
+                {
+                    result.push((Scoring::Fifteen, i.to_vec())).unwrap();
+                }
+            });
+        });
+        s.spawn(|_| {
+            if CARDS[0].into_u8_cribbage()
+                + CARDS[1].into_u8_cribbage()
+                + CARDS[2].into_u8_cribbage()
+                + CARDS[3].into_u8_cribbage()
+                + CARDS[4].into_u8_cribbage()
+                == 15
+            {
+                result
+                    .push((Scoring::ThirtyOne, vec![0, 1, 2, 3, 4]))
+                    .unwrap();
+            }
+        });
+        s.spawn(|_| {
+            SETSOF4.par_iter().for_each(|i| {
+                if CARDS[i[0]].into_u8_cribbage()
+                    + CARDS[i[1]].into_u8_cribbage()
+                    + CARDS[i[2]].into_u8_cribbage()
+                    + CARDS[i[3]].into_u8_cribbage()
+                    == 31
+                {
+                    result.push((Scoring::ThirtyOne, i.to_vec())).unwrap();
+                }
+            });
+        });
+        s.spawn(|_| {
+            if CARDS[0].into_u8_cribbage()
+                + CARDS[1].into_u8_cribbage()
+                + CARDS[2].into_u8_cribbage()
+                + CARDS[3].into_u8_cribbage()
+                + CARDS[4].into_u8_cribbage()
+                == 31
+            {
+                result
+                    .push((Scoring::ThirtyOne, vec![0, 1, 2, 3, 4]))
+                    .unwrap();
+            }
+        });
     });
+    let mut points: u8 = 0;
+    for _ in 0..result.len() {
+        match result.pop().unwrap() {
+            (Scoring::Fifteen, cardsindexes) => {
+                points += 2;
+                print_cards(cardsindexes);
+                println!("15 for {}", points);
+            }
+            (Scoring::ThirtyOne, cardsindexes) => {
+                points += 2;
+                print_cards(cardsindexes);
+                println!("31 for {}", points);
+            }
+            (Scoring::Pair, cardsindexes) => {
+                points += 2;
+                print_cards(cardsindexes);
+                println!("Pair for {}", points);
+            }
+            (Scoring::Run, cardsindexes) => {
+                points += cardsindexes.len() as u8;
+                print_cards(cardsindexes);
+                println!("Run for {}", points);
+            }
+        }
+    }
 }
